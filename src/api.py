@@ -5,66 +5,84 @@ import os
 
 
 class BaseAPI(ABC):
-    """
-    Абстрактный класс для работы с API.
-    """
+    """Абстрактный класс для работы с API (Принцип наследования)"""
 
     @abstractmethod
-    def get_aeroplanes(self, country: str) -> None:
-        """Абстрактный метод для получения информации о самолетах."""
+    def get_aeroplanes(self, country: str) -> list:
         pass
 
 
-class APIAdapter(BaseAPI):
+class AeroplanesAPI(BaseAPI):
     """
-    Класс, наследующийся от абстрактного класса, для работы с платформами
-    nominatim.openstreetmap.org и opensky-network.org.
+    Класс для работы с платформами nominatim и opensky-network.
     """
 
     def __init__(self) -> None:
-        self.openstreetmap_url = 'https://openstreetmap.org'
-        self.opensky_url = 'https://opensky-network.org?'
+        # много раз исправленный URL
+        self.openstreetmap_url = 'https://nominatim.openstreetmap.org/search'
+        self.opensky_url = 'https://opensky-network.org/api/states/all'
+        self.auth = ("anastasia-api-client", "Pt6ciB.4k-FE-3S")
         self.aeroplanes = None
 
-    def get_aeroplanes(self, country: str) -> None:
-        # Headers с user-agent - обязательный параметр при запросе к nominatim.openstreetmap.
-        # Вы можете использовать любое название вместо test-app/1.0, например просто test-app.
-        headers_nominatim = {
-            'User-Agent': 'test-app/1.0',
-        }
+    def get_aeroplanes(self, country: str) -> list:
+        # Изменяет User-Agent на уникальный, чтобы сервера не блокировали запросы
+        headers_nominatim = {'User-Agent': 'MyUniqueEducationalPlaneTrackerApp/1.0'}
+        params_nominatim = {'country': country, 'format': 'json', 'limit': 1}
 
-        # Указываем параметры: в каком формате возвращать данные и максимальную длину списка стран в ответе.
-        params_nominatim = {
-            'country': country,
-            'format': 'json',
-            'limit': 1,
-        }
+        print(f"DEBUG: Отправляем запрос к Nominatim по адресу: {self.openstreetmap_url} с параметрами {params_nominatim}")
 
-        response = get(url=self.openstreetmap_url, params=params_nominatim, headers=headers_nominatim)
+        response = get(url=self.openstreetmap_url, params=params_nominatim, headers=headers_nominatim, auth=self.auth)
 
-        data = response.json()
+        try:
+            data = response.json()
+        except Exception:
+            print("Ошибка: Не удалось получить JSON от сервера OpenStreetMap.")
+            return []
 
-        # Пример ответа от nominatim.openstreetmap можно посмотреть в задании курсовой.
+        if not data:
+            print(f"Страна '{country}' не найдена в базе данных.")
+            return []
+
+        # Получает координаты из первого элемента списка
         geo_coordinates = data[0].get('boundingbox')
+        if not geo_coordinates or len(geo_coordinates) < 4:
+            print("Ошибка: Неверный формат координат от гео-сервера.")
+            return []
 
-        # Параметры для фильтрации самолетов по их географическим координатам.
+        # Задаёт параметры для OpenSky. Ключи исправлены тоже"
         params = {
-            'lamin': geo_coordinates[0],
-            'lamax': geo_coordinates[1],
-            'lomin': geo_coordinates[2],
-            'lomax': geo_coordinates[3],
+            'lamin': float(geo_coordinates[0]),
+            'lamax': float(geo_coordinates[1]),
+            'lomin': float(geo_coordinates[2]),
+            'lomax': float(geo_coordinates[3]),
         }
 
-        response = get(url=self.opensky_url, params=params)
+        # Выполняет запрос к OpenSky
+        response = get(url=self.opensky_url, params=params, auth=self.auth)
 
-        # Пример ответа от opensky-network можно посмотреть в задании курсовой.
-        self.aeroplanes = response.json()
+        # Проверяет статус ответа сервера перед чтением JSON
+        if response.status_code != 200:
+            print(f"Ошибка OpenSky API: Сервер вернул код {response.status_code}. Возможно, требуется авторизация.")
+            self.aeroplanes = None
+            return []
 
+        try:
+            self.aeroplanes = response.json()
+        except Exception:
+            print("Ошибка: OpenSky прислал некорректный ответ (не JSON).")
+            self.aeroplanes = None
+            return []
 
-# класс для работы с самолётами
+        # Возвращает список самолетов
+        if self.aeroplanes and 'states' in self.aeroplanes and self.aeroplanes['states']:
+            return self.aeroplanes['states']
+
+        return []
+
 
 class Aeroplane:
     def __init__(self, callsign: str, origin_country: str, velocity: float, altitude: float) -> None:
+        # Инкапсуляция: валидация входных данных при инициализации
         self.callsign = str(callsign).strip() if callsign else "UNKNOWN"
         self.origin_country = str(origin_country).strip() if origin_country else "Unknown"
 
@@ -79,113 +97,57 @@ class Aeroplane:
             self.altitude = 0.0
 
     @classmethod
-    def cast_to_object_list(cls, raw_data: dict | list | None) -> list:
-        """
-        Преобразует ответ от OpenSky API в список объектов класса Aeroplane.
-        """
+    def cast_to_object_list(cls, raw_states: list) -> list:
+        """Преобразование набора данных в список объектов."""
         object_list = []
-        if not raw_data:
+        if not raw_states:
             return object_list
 
-        # Если передан весь JSON-ответ, извлекает из него список "states"
-        if isinstance(raw_data, dict):
-            states = raw_data.get("states", [])
-        elif isinstance(raw_data, list):
-            states = raw_data
-        else:
-            return object_list
-
-        if not states:
-            return object_list
-
-        for state in states:
+        for state in raw_states:
             try:
-                # Извлекает параметры по индексам из ответа OpenSky:
                 callsign = state[1]
                 origin_country = state[2]
-                altitude = state[7]
-                velocity = state[9]
+                altitude = state[7]  # baro_altitude
+                velocity = state[9]  # velocity
 
-                # Создаёт объект самолета и добавляет его в итоговый список
-                aeroplane_obj = cls(callsign, origin_country, velocity, altitude)
-                object_list.append(aeroplane_obj)
+                object_list.append(cls(callsign, origin_country, velocity, altitude))
             except (IndexError, TypeError):
-                # Если в данных от API какой-то сбой, пропускает это
                 continue
-
         return object_list
 
-    # Реализация методов сравнения самолетов
-
+    # Магические методы сравнения по скорости и высоте полета
     def __lt__(self, other: "Aeroplane") -> bool:
-        """Сравнение 'меньше чем'по скорости, а при равенстве — по высоте"""
-        if not isinstance(other, Aeroplane):
-            return NotImplemented
         if self.velocity != other.velocity:
             return self.velocity < other.velocity
         return self.altitude < other.altitude
 
-    def __le__(self, other: "Aeroplane") -> bool:
-        """Сравнение 'меньше или равно'"""
-        if not isinstance(other, Aeroplane):
-            return NotImplemented
-        if self.velocity != other.velocity:
-            return self.velocity <= other.velocity
-        return self.altitude <= other.altitude
-
-    def __gt__(self, other: "Aeroplane") -> bool:
-        """Сравнение 'больше чем'"""
-        if not isinstance(other, Aeroplane):
-            return NotImplemented
-        if self.velocity != other.velocity:
-            return self.velocity > other.velocity
-        return self.altitude > other.altitude
-
-    def __ge__(self, other: "Aeroplane") -> bool:
-        """Сравнение 'больше или равно'"""
-        if not isinstance(other, Aeroplane):
-            return NotImplemented
-        if self.velocity != other.velocity:
-            return self.velocity >= other.velocity
-        return self.altitude >= other.altitude
-
     def __eq__(self, other: "Aeroplane") -> bool:
-        """Сравнение на равенство"""
-        if not isinstance(other, Aeroplane):
-            return NotImplemented
         return self.velocity == other.velocity and self.altitude == other.altitude
 
     def __repr__(self) -> str:
-        """Вывод объекта на экран при печати списков"""
-        return f"Aeroplane({self.callsign}, {self.origin_country}, V: {self.velocity} m/s, H: {self.altitude} m)"
+        return f"Aeroplane({self.callsign}, {self.origin_country}, V: {self.velocity}, H: {self.altitude})"
 
 
 class BaseSaver(ABC):
-    """
-    Абстрактный класс о самолетах.
-    """
-    @abstractmethod
-    def add_aeroplane(self, aeroplane) -> None:
-        pass
+    """Абстрактный класс для хранилищ."""
 
     @abstractmethod
-    def get_aeroplanes_by_criteria(self, criteria: dict) -> list:
-        pass
+    def add_aeroplane(self, aeroplane) -> None: pass
 
     @abstractmethod
-    def delete_aeroplane(self, aeroplane) -> None:
-        pass
+    def get_aeroplanes_by_criteria(self, criteria: dict) -> list: pass
+
+    @abstractmethod
+    def delete_aeroplane(self, aeroplane) -> None: pass
 
 
 class JSONSaver(BaseSaver):
-    """
-    Класс для сохранения информации о самолетах в JSON-файл.
-    """
+    """Класс для сохранения информации о самолетах в JSON-файл."""
+
     def __init__(self, file_path: str = "data/aeroplanes.json") -> None:
         self.file_path = file_path
 
     def add_aeroplane(self, aeroplane: Aeroplane) -> None:
-        """Метод для добавления информации о самолете в файл."""
         data = []
         if os.path.exists(self.file_path):
             with open(self.file_path, "r", encoding="utf-8") as file:
@@ -194,22 +156,18 @@ class JSONSaver(BaseSaver):
                 except json.JSONDecodeError:
                     data = []
 
-        aeroplane_dict = {
+        data.append({
             "callsign": aeroplane.callsign,
             "origin_country": aeroplane.origin_country,
             "velocity": aeroplane.velocity,
             "altitude": aeroplane.altitude
-        }
-        data.append(aeroplane_dict)
+        })
 
         with open(self.file_path, "w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=False, indent=4)
 
     def delete_aeroplane(self, aeroplane: Aeroplane) -> None:
-        """Метод для удаления информации о самолете."""
-        if not os.path.exists(self.file_path):
-            return
-
+        if not os.path.exists(self.file_path): return
         with open(self.file_path, "r", encoding="utf-8") as file:
             try:
                 data = json.load(file)
@@ -217,9 +175,9 @@ class JSONSaver(BaseSaver):
                 return
 
         data = [item for item in data if item.get("callsign") != aeroplane.callsign]
-
         with open(self.file_path, "w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=False, indent=4)
 
     def get_aeroplanes_by_criteria(self, criteria: dict) -> list:
+        """Заглушка"""
         pass
